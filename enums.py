@@ -64,3 +64,6 @@ class DataTypeConstants(IntEnum):
     mtDate = 5
     mtDouble = 6
     mtBoolean = 7
+
+
+

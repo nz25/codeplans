@@ -15,8 +15,8 @@ class MDDCodeplans():
     def _read_mdd(self):
         mdd = client.Dispatch('MDM.Document')
         mdd.Open(self.path)
-        self.mdd_types = {t.Name: {e.Name: e.Label for e in t.Elements} for t in mdd.Types}
-        self.mdd_variables = {f.Label :
+        self.types = {t.Name: {e.Name: e.Label for e in t.Elements} for t in mdd.Types}
+        self.variables = {f.Label :
             MDDCodeplanVariable(
                 name=f.Label,
                 name_in_mdd=f.Name,            
@@ -30,12 +30,12 @@ class MDDCodeplans():
 
         # saves list of variables per field
         field_variables = defaultdict(list)
-        for v in self.mdd_variables.values():
+        for v in self.variables.values():
             field_variables[v.field_name].append(v)
 
         # saves list of types per field
         field_types = defaultdict(set)
-        for v in self.mdd_variables.values():
+        for v in self.variables.values():
             field_types[v.field_name].add(v.type_name) 
 
         # merges both results in temporary fields list
@@ -74,13 +74,13 @@ class MDDCodeplans():
         
         unchanged_variables = {
             f'{v}.Coding': f'{v}.Coding'
-            for v in self.mdd_variables
+            for v in self.variables
             if v not in changed_variables}
 
         self.variable_map = {**changed_variables, **unchanged_variables}
 
     def __repr__(self):
-        return f'MDDCodeplans(T={len(self.mdd_types)}, V={len(self.mdd_variables)}, HF={len(self.helper_fields)}, NF={len(self.new_fields)})'
+        return f'MDDCodeplans(T={len(self.types)}, V={len(self.variables)}, HF={len(self.helper_fields)}, NF={len(self.new_fields)})'
 
 class MDDCodeplanVariable():
 
@@ -128,7 +128,6 @@ class MDDHelperField(MDDField):
 
     def __repr__(self):
         return f'MDDHelperField(name={self.parent_field_name}.{self.name})'
-
 
 if __name__ == '__main__':
     cp = MDDCodeplans('codeplan_1531899367053_2018-07-18.mdd')
