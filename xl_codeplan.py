@@ -55,9 +55,9 @@ class XLCodeplans():
 
     @property
     def is_valid(self):
-        if self._errors is None:
-            self._errors = False if self.errors else True
-        return bool(self._errors)
+        if self._is_valid is None:
+            self._is_valid = False if self.errors else True
+        return bool(self._is_valid)
 
     def __len__(self):
         return len(self._codeplans)
@@ -66,7 +66,7 @@ class XLCodeplans():
         return self._codeplans[i]
 
     def __repr__(self):
-        return f"XLCodeplans(path='{self.path}', code_column={self.code_column}, delete_empty={self._delete_empty})"
+        return f"XLCodeplans(path='{self.path}', code_column={self.code_column}, delete_empty={self.delete_empty})"
 
 
 class XLCodeplan():
@@ -101,8 +101,8 @@ class XLCodeplan():
                 if row.row_type == XLCodeplanRowTypes.Regular:
                     elements_with_label_list[row.code].append(row.label)
                 elif row.row_type == XLCodeplanRowTypes.Combine:
-                    for c in row.children_codes:
-                        elements_with_label_list[c.code].append(c.label)
+                    for c in row.combine_codes:
+                        elements_with_label_list[c].append('')
             self._elements = []
             for code, labels in elements_with_label_list.items():
                 self._elements.append(
@@ -112,13 +112,13 @@ class XLCodeplan():
                         doubled=True if len(labels) > 1 else False
                     )
                 )
-        return self._elements.sort()
+        self._elements.sort()
+        return self._elements
 
     @property
     def tree(self):
         if self._tree is None:
-
-            current_level = 0
+            
             self._tree = CodeplanNode(
                 name = '',
                 label = '',
@@ -133,35 +133,32 @@ class XLCodeplan():
                 label='',
                 node_type=CodeplanNodeTypes.Base,
                 parent = current_parent,
-                level = 0
+                level = current_parent.level
             )
             self._tree.children.append(base_node)
             
             for row in self._rows:
                 if row.row_type == XLCodeplanRowTypes.NetStart:
-                    current_level += 1
                     node = CodeplanNode(
                         name=f'net{row.index}',
                         label=row.label,
                         node_type=CodeplanNodeTypes.Net,
                         parent=current_parent,
-                        level=current_level)
+                        level=current_parent.level + 1)
                     current_parent.children.append(node)
                     current_parent = node
                 elif row.row_type == XLCodeplanRowTypes.NetEnd:
-                    current_level = len(row.code)
-                    level_difference = current_parent.level - current_level + 1
+                    level_difference = current_parent.level - len(row.code) + 1
                     while level_difference:
                         current_parent = current_parent.parent
                         level_difference -= 1
-                    current_level = current_parent.level
                 elif row.row_type == XLCodeplanRowTypes.Regular:
                     node = CodeplanNode(
                         name=f'{CODE_PREFIX}{row.code}',
                         label=row.label,
                         node_type=CodeplanNodeTypes.Regular,
                         parent=current_parent,
-                        level=current_level)
+                        level=current_parent.level)
                     current_parent.children.append(node)
                 elif row.row_type == XLCodeplanRowTypes.Combine:
                     combine_node = CodeplanNode(
@@ -169,14 +166,14 @@ class XLCodeplan():
                         label=row.label,
                         node_type=CodeplanNodeTypes.Combine,
                         parent=current_parent,
-                        level=current_level)
-                    for c in row.children_codes:
+                        level=current_parent.level)
+                    for c in row.combine_codes:
                         child = CodeplanNode(
                             name=f'{CODE_PREFIX}{c}',
                             label='',
                             node_type=CodeplanNodeTypes.Regular,
                             parent=combine_node,
-                            level=current_level + 1)
+                            level=combine_node.level + 1)
                         combine_node.children.append(child)
                     current_parent.children.append(combine_node)
 
@@ -215,7 +212,7 @@ class XLCodeplan():
                         self._errors.append(f'Empty net in row {row.index}')
                     current_level = len(row.code) - 1
                 elif row.row_type == XLCodeplanRowTypes.Combine:
-                    if len(row.children_codes) != len(set(row.children_codes)):
+                    if len(row.combine_codes) != len(set(row.combine_codes)):
                         self._errors.append(
                             f'Duplicate codes found in row {row.index}')
                 elif row.row_type == XLCodeplanRowTypes.Regular:
@@ -235,10 +232,10 @@ class XLCodeplan():
         return self._is_valid
 
     def __len__(self):
-        return len(self._rows)
+        return len(self.elements)
 
     def __getitem__(self, i):
-        return self._rows[i]
+        return self.elements[i]
 
     def __repr__(self):
         return f"XLCodeplan(name='{self.name}'), len={len(self)}"
@@ -252,7 +249,7 @@ class XLCodeplanRow():
         self.index = index
 
         self._row_type = None
-        self._children_codes = None
+        self._combine_codes = None
         self._is_valid = None
 
     @property
@@ -278,16 +275,16 @@ class XLCodeplanRow():
         return self._row_type
 
     @property
-    def children_codes(self):
-        if self._children_codes is None:
+    def combine_codes(self):
+        if self._combine_codes is None:
             if self.row_type != XLCodeplanRowTypes.Combine:
-                self._children_codes = []
+                self._combine_codes = []
             elif '.' in self.code and self.code.replace('.', '', 1).isdigit():
-                self._children_codes = self.code.split('.')
+                self._combine_codes = self.code.split('.')
             elif ',' in self.code:
-                self._children_codes = [
+                self._combine_codes = [
                     c.strip() for c in self.code.split(',') if c.strip().isdigit()]
-        return self._children_codes
+        return self._combine_codes
 
     @property
     def is_valid(self):
@@ -318,9 +315,11 @@ def test():
             print('- OK')
         print('----------------------------------')
 
+
     print('OK')
 
 if __name__ == '__main__':
     from timeit import timeit
     print(timeit(test, number=1))
+    print('OK')
 

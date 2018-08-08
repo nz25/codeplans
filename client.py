@@ -6,12 +6,27 @@ def main():
     xl = XLCodeplans('Codeplan KTV online 201807.xlsx')
     print('ok')
 
+
+
+
+def _build_label_bitmap(axis):
+    in_label = False
+    consecutive_quotes = 0
+    label_bitmap = []
+    for c in axis:
+        if c == "'":
+            in_label = True
+            consecutive_quotes += 1
+        else:
+            if in_label and not consecutive_quotes % 2:
+                in_label = not in_label
+                consecutive_quotes = 0
+        label_bitmap.append(in_label)
+    return label_bitmap
+
 if __name__ == '__main__':
-    from timeit import timeit
-    print(timeit('main()', globals=globals(), number=1))
-
-
-
+    x = _build_label_bitmap("n '''hel''lob' x")
+    print(x)
 
 
 

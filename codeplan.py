@@ -11,22 +11,26 @@ class CodeplanNodeTypes(IntEnum):
 class CodeplanSources(IntEnum):
     XL = 1
     MDD = 2
+    Master = 3
 
 class Codeplan:
 
-    def __init__(self, xl_codeplan, mdd_codeplan, xl_mdd_adapter, *,
+    def __init__(self,
+    mdd_codeplan,
+    xl_codeplan=None,
+    mdd_xl_adapter=None,
     element_source=CodeplanSources.MDD,
     label_source=CodeplanSources.MDD,
     axis_source=CodeplanSources.XL):
         self.xl_codeplan = xl_codeplan
         self.mdd_codeplan = mdd_codeplan
-        self.xl_mdd_adapter = xl_mdd_adapter
+        self.xl_mdd_adapter = mdd_xl_adapter
         self.element_source = element_source
         self.label_source = label_source
         self.axis_source = axis_source
 
     def __repr__(self):
-        return f'Codeplan(xl_codeplan = {self.xl_codeplan}, mdd_codeplan={self.mdd_codeplan}, element_source={self.element_source}, label_source={self.label_source}, axis_source={self.axis_source})'
+        return f'Codeplan(mdd_codeplan={self.mdd_codeplan}, xl_codeplan = {self.xl_codeplan}, xl_mdd_adapter={self.xl_mdd_adapter},element_source={self.element_source}, label_source={self.label_source}, axis_source={self.axis_source})'
 
 class CodeplanNode:
 
@@ -53,10 +57,10 @@ class CodeplanNode:
                 self._axis = f'{self.name} \'{label}\' combine({{{",".join(c.axis for c in self.children)}}})'
             elif self.node_type == CodeplanNodeTypes.Regular:
                 self._axis = f'{self.name}'
-            return self._axis    
+        return self._axis    
 
     def __repr__(self):
-        return f"CodeplanNode(name='{self.name}', label='{self.label}', node_type={self.node_type}, parent={self.parent}, level={self.level})"
+        return f"CodeplanNode(name='{self.name}', label='{self.label}', node_type={self.node_type}, parent={self.parent}, level={self.level}, children={len(self.children)})"
 
 class CodeplanElement:
 
@@ -69,4 +73,16 @@ class CodeplanElement:
         return int(self.code[len(CODE_PREFIX):]) > int(other.code[len(CODE_PREFIX):])
 
     def __repr__(self):
-        return f"CodeplanElement(code={self.code}, label='{self.label}', doubled={self.doubled})"
+        return f"CodeplanElement(code='{self.code}', label='{self.label}', doubled={self.doubled})"
+
+
+def test():
+    pass
+
+
+
+if __name__ == '__main__':
+    from timeit import timeit
+    print(timeit(test, number=1))
+    print('OK')
+
