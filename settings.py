@@ -1,1 +1,0 @@
-CODE_PREFIX = 'CB_'
