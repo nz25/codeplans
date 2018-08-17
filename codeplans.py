@@ -230,18 +230,22 @@ class MDDFile():
                     )
                     for e in t.Elements
                 ],
-                variables=[
-                    MDDVariable(
-                        name=f.Name,
-                        label=f.Label,
-                        type_name=t.Name,
-                        axis=f.AxisExpression
-                    )
+                axis={f.AxisExpression
                     for f in mdd.Fields
                     if f.ObjectTypeValue == ObjectTypesConstants.mtVariable
-                    and f.Elements.Reference.Name == t.Name
-                ]
+                        and f.Elements.Reference.Name == t.Name
+                }.pop()
             ) for t in mdd.Types
+        ]
+        self.variables = [
+            MDDVariable(
+                name=f.Name,
+                label=f.Label,
+                type_name=f.Elements.Reference.Name,
+                axis=f.AxisExpression
+            )
+            for f in mdd.Fields
+            if f.ObjectTypeValue == ObjectTypesConstants.mtVariable
         ]
 
         mdd.Close()
@@ -255,15 +259,13 @@ class MDDFile():
 
             # saves list of variables per field
             field_variables = defaultdict(list)
-            for cp in self._codeplans:
-                for v in cp.variables:
-                    field_variables[v.field_name].append(v)
+            for v in self.variables:
+                field_variables[v.field_name].append(v)
 
             # saves list of types per field
             field_types = defaultdict(set)
-            for cp in self._codeplans:
-                for v in cp.variables:
-                    field_types[v.field_name].add(v.type_name)
+            for v in self.variables:
+                field_types[v.field_name].add(v.type_name)
 
             # merges both results in temporary fields list
             Field = namedtuple('Field', 'name variables types')
@@ -284,12 +286,53 @@ class MDDFile():
                 for v in f.variables
             ]
 
-            for cp in self._codeplans:
-                for v in cp.variables:
-                    if v in multitype_variables:
-                        self._variable_map[f'{v.label}'] = v.compliant_name
+            for v in self.variables:
+                if v in multitype_variables:
+                    self._variable_map[f'{v.label}'] = v.compliant_name
 
         return self._variable_map
+
+    def append_mdd(self, path):
+
+        mdd = client.Dispatch('MDM.Document')
+        mdd.Open(path, mode=openConstants.oREAD)
+
+        new_codeplans = [
+            MDDCodeplan(
+                name=t.Name,
+                elements=[
+                    CodeplanElement(
+                        code=e.Name,
+                        label=e.label)
+                    for e in t.Elements
+                    ],
+                axis={f.AxisExpression
+                    for f in mdd.Fields
+                    if f.ObjectTypeValue == ObjectTypesConstants.mtVariable
+                        and f.Elements.Reference.Name == t.Name
+                }.pop())
+            for t in mdd.Types
+            if t.Name not in [cp.name for cp in self._codeplans]
+        ]
+        self._codeplans.extend(new_codeplans)
+
+        new_variables = [
+            MDDVariable(
+                name=f.Name,
+                label=f.Label,
+                type_name=f.Elements.Reference.Name,
+                axis=f.AxisExpression
+            )
+            for f in mdd.Fields
+            if f.ObjectTypeValue == ObjectTypesConstants.mtVariable
+                and f.Name not in [v.name for v in self.variables]
+        ]
+        self.variables.extend(new_variables)
+
+        mdd.Close()
+        self._variable_map = None
+        self._errors = None
+        self._is_valid = None
 
     def save_mdd(self, path):
         mdd = client.Dispatch('MDM.Document')
@@ -302,12 +345,12 @@ class MDDFile():
                 new_list.Add(new_element)
             mdd.Types.Add(new_list)
             
-            for v in cp.variables:
-                new_variable = mdd.CreateVariable(v.name, self.variable_map.get(v.label, v.label + HELPER_FIELD))
-                new_variable.DataType = DataTypeConstants.mtCategorical
-                new_variable.Elements.ReferenceName = v.type_name
-                new_variable.AxisExpression = cp.axis
-                mdd.Fields.Add(new_variable)
+        for v in self.variables:
+            new_variable = mdd.CreateVariable(v.name, self.variable_map.get(v.label, v.label + HELPER_FIELD))
+            new_variable.DataType = DataTypeConstants.mtCategorical
+            new_variable.Elements.ReferenceName = v.type_name
+            new_variable.AxisExpression = v.axis
+            mdd.Fields.Add(new_variable)
 
         mdd.CategoryMap.AutoAssignValues()
         mdd.Save(path)
@@ -318,7 +361,8 @@ class MDDFile():
         variable_map = {old + HELPER_FIELD: new for old, new in self.variable_map.items()}
         category_map = {v.label + HELPER_FIELD: {**cp.category_map}
             for cp in self._codeplans
-            for v in cp.variables}
+            for v in self.variables
+            if v.type_name == cp.name}
 
         with open(self.txt_path, mode='r', encoding='utf-8') as input_file, \
         open(path, mode='w', encoding='utf-8') as output_file:
@@ -383,7 +427,10 @@ class MDDFile():
         return len(self._codeplans)
 
     def __getitem__(self, i):
-        return self._codeplans[i]
+        if isinstance(i, str):
+            return [cp for cp in self._codeplans if cp.name == i][0]
+        else:
+            return self._codeplans[i]
 
     def __repr__(self):
         return f"MDDCodeplans(path='{self.mdd_path}')"
@@ -391,14 +438,13 @@ class MDDFile():
 
 class MDDCodeplan:
 
-    def __init__(self, name, elements, variables):
+    def __init__(self, name, elements, axis):
         self.name = name
         self._elements = elements
-        self.variables = variables
+        self.axis = axis
         self._errors = None
         self._tree = None
         self._is_valid = None
-        self._axis = None
         self.variable_map = {}
         self.category_map = {}
 
@@ -406,8 +452,6 @@ class MDDCodeplan:
     def errors(self):
         if self._errors is None:
             self._errors = []
-            if len({v.axis for v in self.variables}) > 1:
-                self._errors.append(f'Axis expressions are not unique')
         return self._errors
 
     @property
@@ -528,12 +572,6 @@ class MDDCodeplan:
         return self._is_valid
 
     @property
-    def axis(self):
-        if self._axis is None:
-            self._axis = {v.axis for v in self.variables}.pop()
-        return self._axis
-
-    @property
     def net_elements(self):
         return [n for n in self.flat_tree if n.node_type == CodeplanNodeTypes.Net]
 
@@ -596,7 +634,10 @@ Errors: {error_string}''')
         return len(self._elements)
 
     def __getitem__(self, i):
-        return self._elements[i]
+        if isinstance(i, str):
+            return [e for e in self._elements if e.code == i][0]
+        else:
+            return self._elements[i]
 
     def __repr__(self):
         return f"MDDCodeplan(name='{self.name}'), len={len(self)}"
@@ -869,7 +910,10 @@ Errors: {error_string}''')
         return len(self.elements)
 
     def __getitem__(self, i):
-        return self.elements[i]
+        if isinstance(i, str):
+            return [e for e in self._elements if e.code == i][0]
+        else:
+            return self._elements[i]
 
     def __repr__(self):
         return f"XLCodeplan(name='{self.name}'), len={len(self)}"

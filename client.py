@@ -1,7 +1,8 @@
 from codeplans import MDDFile, XLCodeplan
 
 def main():
-    mdd_file = MDDFile('codeplan_1533204901432_2018-08-02.mdd', 'verbatims_1533204821119_02.08.2018_2.txt')
+    mdd_file = MDDFile('codeplan_1534341682119_2018-08-15.mdd', 'verbatims_1534341570606_15.08.2018.txt')
+    mdd_file.append_mdd('codeplan_1533204901432_2018-08-02.mdd')
 
     mdd_xl_adapter = {
         'head_11326': 'CP Versicherungen KTV_BEARB',
@@ -34,7 +35,7 @@ def main():
     for mdd_name, xl_name in mdd_xl_adapter.items():
         mdd_codeplan = mdd_file.get_codeplan(mdd_name)
         xl_codeplan = XLCodeplan(
-            path='Examples//Codeplan KTV online 201807.xlsx',
+            path='Codeplan KTV online 201808_vorab_2018-08-15.xlsx',
             sheet_name=xl_name,
             other_element_name='CB_999'
         )
@@ -42,6 +43,7 @@ def main():
         xl_codeplan.print_summary()
         mdd_codeplan.print_summary()
         mdd_codeplan.inject(xl_codeplan)
+        print('')
 
     mdd_file.save_mdd('new.mdd')
     mdd_file.save_cfile('new.txt')
