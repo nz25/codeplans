@@ -416,13 +416,6 @@ class MDDFile():
             self._is_valid = False if self.errors else True
         return bool(self._is_valid)
 
-    def get_codeplan(self, name):
-        codeplans = [cp for cp in self._codeplans if cp.name == name]
-        if codeplans:
-            return codeplans[0]
-        else:
-            raise ValueError(f"Codeplan '{name}' not found")
-
     def __len__(self):
         return len(self._codeplans)
 
@@ -433,7 +426,7 @@ class MDDFile():
             return self._codeplans[i]
 
     def __repr__(self):
-        return f"MDDCodeplans(path='{self.mdd_path}')"
+        return f"MDDFile(path='{self.mdd_path}')"
 
 
 class MDDCodeplan:
@@ -604,7 +597,7 @@ class MDDCodeplan:
             #raise ValueError(f"Excel elements missing in MDD: {','.join(missing_in_mdd)}")
             print(f'XL elements missing in MDD: {",".join(missing_in_mdd)}')
         if missing_in_xl:
-            if xl_codeplan.other_element_name:
+            if xl_codeplan.other_element:
                 print(f'MDD elements missing in Excel: {",".join(missing_in_xl)}')
                 self.category_map = {e: xl_codeplan.other_element_name for e in missing_in_xl}
             else:
@@ -693,11 +686,10 @@ class MDDVariable:
 
 class XLCodeplan():
 
-    def __init__(self, path, sheet_name, *, code_column=1, other_element_name=''):
+    def __init__(self, path, sheet_name, *, code_column=1):
         self.path = path
         self.name = sheet_name
         self.code_column = code_column
-        self.other_element_name = other_element_name
         worksheet = load_workbook(self.path, read_only=True, data_only=True)[sheet_name]
         all_rows = [
             XLCodeplanRow(
@@ -708,6 +700,7 @@ class XLCodeplan():
             for index, row in enumerate(worksheet, start=1)
         ]
         self._rows = self._trim_rows(all_rows)
+        self._other_element = None
         self._elements = None
         self._tree = None
         self._errors = None
@@ -726,6 +719,14 @@ class XLCodeplan():
                 last_valid_row = row.index
                 break
         return rows[first_valid_row - 1:last_valid_row]
+
+    @property
+    def other_element(self):
+        return self._other_element
+    
+    @other_element.setter
+    def other_element(self, value):
+        self._other_element = value
 
     @property
     def elements(self):
