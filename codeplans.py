@@ -209,9 +209,8 @@ class CodeplanElement:
 
 class MDDFile():
 
-    def __init__(self, mdd_path, txt_path):
+    def __init__(self, mdd_path,):
         self.mdd_path = mdd_path
-        self.txt_path = txt_path
         self._read_mdd()
         self._variable_map = None
         self._errors = None
@@ -349,58 +348,12 @@ class MDDFile():
             new_variable = mdd.CreateVariable(v.name, self.variable_map.get(v.label, v.label + HELPER_FIELD))
             new_variable.DataType = DataTypeConstants.mtCategorical
             new_variable.Elements.ReferenceName = v.type_name
-            new_variable.AxisExpression = v.axis
+            new_variable.AxisExpression = [cp for cp in self._codeplans if cp.name == v.type_name][0].axis
             mdd.Fields.Add(new_variable)
 
         mdd.CategoryMap.AutoAssignValues()
         mdd.Save(path)
         mdd.Close()
-
-    def save_cfile(self, path, *, cfile_source=CFileSources.Verbaco):
-
-        variable_map = {old + HELPER_FIELD: new for old, new in self.variable_map.items()}
-        category_map = {v.label + HELPER_FIELD: {**cp.category_map}
-            for cp in self._codeplans
-            for v in self.variables
-            if v.type_name == cp.name}
-
-        with open(self.txt_path, mode='r', encoding='utf-8') as input_file, \
-        open(path, mode='w', encoding='utf-8') as output_file:
-            for input_line in input_file:
-                if cfile_source == CFileSources.Verbaco:
-                    output_line = self._update_verbaco_line(input_line, variable_map, category_map)
-                elif cfile_source == CFileSources.Ascribe:
-                    output_line = self._update_ascribe_line(input_line, variable_map, category_map)
-                output_file.write(output_line)
-
-    def _update_verbaco_line(self, input_line, variable_map, category_map):
-        sql_parts = input_line.split(' ')
-        assignment = sql_parts[3]
-        variable = assignment.split('=')[0]
-        codes = assignment.split('=')[1][1:-1].split(',')
-        new_variable = variable_map.get(variable, variable)
-        variable_category_map = category_map.get(variable)
-        new_codes = [variable_category_map.get(c, c) for c in codes] if variable_category_map else codes
-        new_codes_without_duplicates = dict.fromkeys(new_codes)
-        new_assignment = f"{new_variable}={{{','.join(new_codes_without_duplicates)}}}"
-        sql_parts[3] = new_assignment
-        return ' '.join(sql_parts)
-
-
-    def _update_ascribe_line(self, input_line, variable_map, category_map):
-        assignments_string, criteria = input_line[17:].split(' WHERE ')
-        assignments = assignments_string.strip().split(', ')
-        new_assignments = []
-        for a in assignments:
-            variable = a.split('=')[0].strip()
-            codes = a.split('=')[1].strip()[1:-1].split(',')
-            new_variable = variable_map.get(variable, variable)
-            variable_category_map = category_map.get(variable)
-            new_codes = [variable_category_map.get(c, c) for c in codes] if variable_category_map else codes
-            new_codes_without_duplicates = dict.fromkeys(new_codes)
-            new_assignment = f"{new_variable} = {{{','.join(new_codes_without_duplicates)}}}"
-            new_assignments.append(new_assignment)
-        return f"UPDATE vdata SET {', '.join(new_assignments)} WHERE {criteria}"
 
     @property
     def errors(self):
@@ -428,6 +381,8 @@ class MDDFile():
     def __repr__(self):
         return f"MDDFile(path='{self.mdd_path}')"
 
+    def __contains__(self, value):
+        return bool([cp for cp in self._codeplans if cp.name == str(value)])
 
 class MDDCodeplan:
 
@@ -599,7 +554,7 @@ class MDDCodeplan:
         if missing_in_xl:
             if xl_codeplan.other_element:
                 print(f'MDD elements missing in Excel: {",".join(missing_in_xl)}')
-                self.category_map = {e: xl_codeplan.other_element_name for e in missing_in_xl}
+                self.category_map = {e: xl_codeplan.other_element for e in missing_in_xl}
             else:
                 raise ValueError(f"'Other element' not set in excel codeplan '{xl_codeplan.name}'")
 
@@ -974,3 +929,63 @@ class XLCodeplanRow():
     def __repr__(self):
         return f"XLCodeplanRow(code='{self.code}', label='{self.label}', index={self.index})"
 
+
+class CFileManager:
+
+    def __init__(self, mdd_file, cfile_path):
+        self.mdd_file = mdd_file
+        self.cfile_path = cfile_path
+
+
+    def save_cfile(self, new_path, *, cfile_source=CFileSources.Verbaco):
+
+        variable_map = {old + HELPER_FIELD: new for old, new in self.mdd_file.variable_map.items()}
+        category_map = {v.label + HELPER_FIELD: {**cp.category_map}
+            for cp in self.mdd_file
+            for v in self.mdd_file.variables
+            if v.type_name == cp.name}
+
+        with open(self.cfile_path, mode='r', encoding='utf-8') as input_file, \
+        open(new_path, mode='w', encoding='utf-8') as output_file:
+            for input_line in input_file:
+                if cfile_source == CFileSources.Verbaco:
+                    output_line = self._update_verbaco_line(input_line, variable_map, category_map)
+                elif cfile_source == CFileSources.Ascribe:
+                    output_line = self._update_ascribe_line(input_line, variable_map, category_map)
+                output_file.write(output_line)
+
+    def _update_verbaco_line(self, input_line, variable_map, category_map):
+        sql_parts = input_line.split(' ')
+        assignment = sql_parts[3]
+        variable = assignment.split('=')[0]
+        codes = assignment.split('=')[1][1:-1].split(',')
+        new_variable = variable_map.get(variable, variable)
+        variable_category_map = category_map.get(variable)
+        new_codes = [variable_category_map.get(c, c) for c in codes] if variable_category_map else codes
+        new_codes_without_duplicates = dict.fromkeys(new_codes)
+        new_assignment = f"{new_variable}={{{','.join(new_codes_without_duplicates)}}}"
+        sql_parts[3] = new_assignment
+        return ' '.join(sql_parts)
+
+
+    def _update_ascribe_line(self, input_line, variable_map, category_map):
+        assignments_string, criteria = input_line[17:].split(' WHERE ')
+        assignments = assignments_string.strip().split(', ')
+        new_assignments = []
+        for a in assignments:
+            variable = a.split('=')[0].strip()
+            codes = a.split('=')[1].strip()[1:-1].split(',')
+            new_variable = variable_map.get(variable, variable)
+            variable_category_map = category_map.get(variable)
+            new_codes = [variable_category_map.get(c, c) for c in codes] if variable_category_map else codes
+            new_codes_without_duplicates = dict.fromkeys(new_codes)
+            new_assignment = f"{new_variable} = {{{','.join(new_codes_without_duplicates)}}}"
+            new_assignments.append(new_assignment)
+        return f"UPDATE vdata SET {', '.join(new_assignments)} WHERE {criteria}"
+
+
+def update_master_mdd(master_path, verbaco_path, adapter):
+    pass
+
+def update_master_ddf(master_path, cfile_path):
+    pass
