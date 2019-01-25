@@ -2,14 +2,14 @@
 
 from collections import namedtuple
 
-ROUND_LABEL = '2018-09'
+ROUND_LABEL = '2018-10'
 JOB_ROOT = f'test\\{ROUND_LABEL}\\'
 
 # input 
-MDD_CODEPLAN = f'{JOB_ROOT}Data\\Coding\\Raw\\codeplan_1538475273482_2018-10-02.mdd'
+MDD_CODEPLAN = f'{JOB_ROOT}Data\\Coding\\Raw\\codeplan_1541406588537_2018-11-05.mdd'
 #XLS in neuem Format abspeichern:
-EXCEL_CODEPLAN = f'{JOB_ROOT}Data\\Coding\\Codeplan KTV online 201809.xlsx'
-VERBACO_CFILE = f'{JOB_ROOT}Data\\Coding\\Raw\\verbatims_1538475157942_02.10.2018.txt'
+EXCEL_CODEPLAN = f'{JOB_ROOT}Data\\Coding\\Codeplan KTV online 201810.xlsx'
+VERBACO_CFILE = f'{JOB_ROOT}Data\\Coding\\Raw\\verbatims_1541406031376_05.11.2018.txt'
 DB_CFILE = f'{JOB_ROOT}Data\\Coding\\Raw\\dw_ktv_cfile_{ROUND_LABEL}.txt'
 DB_CORRECTION_CFILE = f'{JOB_ROOT}Data\\Coding\\dw_ktv_cfile_{ROUND_LABEL}_corrections_MaF.txt'
 
@@ -75,5 +75,7 @@ ADAPTER = [
     CodeplanMap(None, 'CP ZNUE_VEREIN2', 'cp_znue_verein', None),
     CodeplanMap(None, 'CP Cosmos VP Marken', 'cp_zcport1', None),
     CodeplanMap(None, 'CP Cosmos VP Nutzung', 'cp_zcport_5s_8s', None),
-    CodeplanMap(None, 'CP Cosmos VP Begründung', 'cp_zcport_rest', None)
+    CodeplanMap(None, 'CP Cosmos VP Begründung', 'cp_zcport_rest', None),
+	CodeplanMap('head_51907', 'CP Winh HanseMerkur', 'cp_f4_hansem', 'CB_999'),
+	CodeplanMap('head_51908', 'CP ZHanse_Marke_Like_Dislike', 'cp_zhanse_marke', 'CB_999')
 ]

@@ -17,14 +17,8 @@ HELPER_FIELD =  '.Coding'
 
 class CodeplanNodeTypes(IntEnum):
     Root = 0
-    Regular = 1
-    Combine = 2
-    Net = 3
-
-class CodeplanSources(IntEnum):
-    XL = 1
-    MDD = 2
-    Master = 3
+    Basic = 1
+    Parent = 2
 
 class CFileSources(IntEnum):
     Verbaco = 1
@@ -134,36 +128,222 @@ class openConstants(IntEnum):
 #
 ############################################################################
 
+
 class CodeplanNode:
 
-    def __init__(self, code, label, node_type, parent, level):
-        self.code = code
-        self.label = label
-        self.node_type = node_type
-        self.parent = parent
-        self.level = level
-        self.children = []
-        self._flat_children = None
+    def __init__(self, name='', label='', function='', properties='', parent=None, level=0):
+        self._name = name
+        self._label = label
+        self._function = function
+        self._properties = properties
+        self._parent = parent
+        self._level = level       
+
         self._axis = None
+        self._children = []
+        self._flat_children = None
+
+    @classmethod
+    def from_axis(cls, axis, parent=None, level=0):
+
+        node = CodeplanNode()
+        node._axis = axis
+        node._parent = parent
+        node._level = level
+
+        # sets label mask
+        in_label = False
+        quote_pending = False
+        label_mask = []
+        for c in axis:
+            if c == "'": # label starts or continues
+                in_label = True
+                quote_pending = not quote_pending
+            elif in_label and not quote_pending: #label ends
+                in_label = False
+                quote_pending = False
+            label_mask.append(in_label)
+
+        # sets level mask
+        level_mask = []
+        level = 1
+        for c, in_label in zip(axis, label_mask):
+            if c == ')' and not in_label:
+                level -= 1
+            level_mask.append(level)
+            if c == '(' and not in_label:
+                level += 1
+
+        # sets children mask
+        children_mask = []
+        nested_brackets = 0
+        for c in axis:
+            if c == '{':
+                nested_brackets += 1
+            children_mask.append(bool(nested_brackets))
+            if c == '}':
+                nested_brackets -= 1
+    
+        # sets characters
+        AxisChar = namedtuple('AxisChar', 'idx char in_label in_children level')
+        characters = [
+            AxisChar(x[0], *x[1])
+            for x in enumerate(zip(axis, label_mask, children_mask, level_mask))
+        ]
+
+        # sets children if they were found in children mask
+        node._children = []
+        if any(children_mask):
+            first = min(c.idx for c in characters if c.in_children) + 1
+            last = max(c.idx for c in characters if c.in_children)
+            current_idx = first
+            current_level = characters[first].level
+            for c in characters[first:last]:
+                if not c.in_label and c.level == current_level and c.char == ',' :
+                        node._children.append(CodeplanNode.from_axis(
+                            axis[current_idx:c.idx].strip(),
+                            parent = node,
+                            level = node.level + 1
+                            ))
+                        current_idx = c.idx + 1
+            node._children.append(CodeplanNode.from_axis(
+                axis[current_idx:last].strip(),
+                parent = node,
+                level = node.level + 1
+                ))
+
+        # sets body, name, label, function and properties
+        body = ''.join(c.char for c in characters if not c.in_children).strip()
+        node._label = ''.join(c.char for c in characters if not c.in_children and c.in_label)[1:-1].replace("''", "'").strip()
+        body_without_label = ''.join(c.char for c in characters if not c.in_children and not c.in_label).strip()
+        start_properties = body_without_label.find('[')
+        if start_properties >= 0:
+            node._properties = body_without_label[start_properties:]
+            body_without_label = body_without_label[:start_properties].strip()
+        else:
+            node._properties = ''
+        
+        split_body = body_without_label.split(maxsplit=1)
+
+        if not body: # if there is no body
+            node._name = ''
+            node._function = ''
+        elif len(split_body) == 1 and '(' not in body_without_label: # single code
+            node._name = body_without_label
+            node._function = ''
+        elif len(split_body) == 1 and '(' in body_without_label: # single function
+            node._name = ''
+            node._function = body_without_label
+        elif len(split_body) == 2: # function
+            node._name = split_body[0].strip()
+            node._function = split_body[1].strip()
+
+        return node
+
+    @classmethod
+    def from_excel(cls, xl_rows):
+
+        root = CodeplanNode()
+        current_parent = root
+
+        for row in xl_rows:
+            if row.row_type == XLCodeplanRowTypes.NetStart:
+                node = CodeplanNode(
+                    name=f'net{row.index}',
+                    label=row.label,
+                    function='net()',
+                    parent=current_parent,
+                    level=current_parent.level + 1)
+                current_parent.children.append(node)
+                current_parent = node
+            elif row.row_type == XLCodeplanRowTypes.NetEnd:
+                level_difference = current_parent.level - len(row.code) + 1
+                while level_difference:
+                    current_parent = current_parent.parent
+                    level_difference -= 1
+            elif row.row_type == XLCodeplanRowTypes.Regular:
+                node = CodeplanNode(
+                    name=f'{CODE_PREFIX}{row.code}',
+                    label=row.label,
+                    parent=current_parent,
+                    level=current_parent.level + 1)
+                current_parent.children.append(node)
+            elif row.row_type == XLCodeplanRowTypes.Combine:
+                combine_node = CodeplanNode(
+                    name=f'comb{row.index}',
+                    label=row.label,
+                    function='combine()',
+                    parent=current_parent,
+                    level=current_parent.level + 1)
+                for c in row.combine_codes:
+                    child = CodeplanNode(
+                        name=f'{CODE_PREFIX}{c}',
+                        parent=combine_node,
+                        level=combine_node.level + 1)
+                    combine_node.children.append(child)
+                current_parent.children.append(combine_node)
+
+        return root
 
     @property
     def axis(self):
-        if self._axis is None:
-            label = self.label.replace(r"'", r"''")
-            if self.node_type == CodeplanNodeTypes.Root:
-                self._axis = f'{{base(), {",".join(c.axis for c in self.children)}}}'
-            elif self.node_type == CodeplanNodeTypes.Net:
-                self._axis = f'{self.code} \'{label}\' net({{{",".join(c.axis for c in self.children)}}})'
-            elif self.node_type == CodeplanNodeTypes.Combine:
-                self._axis = f'{self.code} \'{label}\' combine({{{",".join(c.axis for c in self.children)}}})'
-            elif self.node_type == CodeplanNodeTypes.Regular:
-                self._axis = f'{self.code}'
+        if self._axis == None:
+            
+            # building axis: name and label
+            escaped_label = self._label.replace("'", "''")
+            self._axis = f"{self._name} '{escaped_label}'" if self._label else self._name
+            
+            # building axis: function and children
+            children = f'{{{",".join(c.axis for c in self._children)}}}' if self._children else ''
+            if self._function and self._children:
+                self._axis += f" {self._function[:-1]}{children}{self._function[-1]}"
+            elif self._function and not self._children:
+                self._axis += f" {self._function}"  
+            elif not self._function and self._children:
+                self._axis += f" {children}"
+            
+            # building axis: properties
+            self._axis += self.properties
+            
         return self._axis
 
     @property
+    def xl_axis(self):
+
+        result = ''
+        if self.function == 'net()':
+            result = (f'{"*"*self.level}\t{self.label}\n'
+                + ''.join(c.xl_axis for c in self.children)
+                + ('#' * self.level)) + '\n'
+        elif self.function == 'combine()':
+            result = (','.join(c.name[len(CODE_PREFIX):] for c in self.children)
+                + '\t' + self.label) + '\n'
+        elif self.function == '':
+            result = f'{self.name[len(CODE_PREFIX):]}\t{self.label}\n'
+
+        return result
+
+    def get_tom_axis(self, total_label='Sum'):
+        tom_node = CodeplanNode.from_axis(self.axis)
+        if tom_node.children[0].function != 'base()':
+            tom_node.children.insert(0, CodeplanNode.from_axis('base()'))
+        if tom_node.children[-1].function != 'total()':
+            tom_node.children.append(CodeplanNode.from_axis(f"sum '{total_label}' total()"))
+        tom_node._axis = None
+        return tom_node.axis
+
+    @property
+    def parent(self):
+        return self._parent
+
+    @property
+    def children(self):
+        return self._children
+
+    @property
     def flat_children(self):
-        # deep first traversal
-        if self._flat_children is None:
+        if self._flat_children == None:
+            # deep first traversal
             self._flat_children = []
             stack = [*self.children]
             while stack:
@@ -174,8 +354,50 @@ class CodeplanNode:
                     stack.insert(0, child)
         return self._flat_children
 
+    @property
+    def indented_children(self):
+        return [f'{"    "*(node.level - 1)}{node.name} - {node.label}' for node in self.flat_children]
+
+    @property
+    def xl_children(self):
+
+        result = []
+        if not self.children:
+            return result
+
+        children_axis = ''.join(c.xl_axis for c in self.children).strip().split('\n')
+        last_line = ' '
+        for line in children_axis[::-1]:
+            if line[0] == last_line[0] == '#':
+                pass
+            else:
+                result.append(line)
+            last_line = line
+
+        return result[::-1]
+
+    @property
+    def level(self):
+        return self._level
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def label(self):
+        return self._label
+
+    @property
+    def function(self):
+        return self._function
+
+    @property
+    def properties(self):
+        return self._properties
+
     def __repr__(self):
-        return f"CodeplanNode(code='{self.code}', label='{self.label}', node_type={self.node_type}, parent={self.parent}, level={self.level}), len={len(self.children)}"
+        return f'CodeplanNode({self.name} - {self.label})'
 
 class CodeplanElement:
 
@@ -402,110 +624,13 @@ class MDDCodeplan:
 
     @property
     def tree(self):
-        if self._tree is None and self.axis:
-            self.axis = self.axis[1:-1]
-            label_bitmap = self._build_label_bitmap(self.axis)
-            split_axis = self._split_axis(self.axis, label_bitmap)
-            self._tree = self._build_tree(split_axis)
-
+        if self._tree is None:
+            self._tree = CodeplanNode.from_axis(self.axis)
         return self._tree
-
+    
     @tree.setter
     def tree(self, value):
         self._tree = value
-
-    def _build_label_bitmap(self, axis):
-        in_label = False
-        consecutive_quotes = 0
-        label_bitmap = []
-        for c in axis:
-            if c == "'":
-                in_label = True
-                consecutive_quotes += 1
-            else:
-                if in_label and not consecutive_quotes % 2:
-                    in_label = not in_label
-                    consecutive_quotes = 0
-            label_bitmap.append(in_label)
-        return label_bitmap
-
-    def _split_axis(self, axis, label_bitmap):
-        last_character = 0
-        split_axis = []
-        for i in range(len(axis)):
-            in_label = label_bitmap[i]
-            if not in_label:
-                current_character = axis[i]
-                last_2_characters = axis[i-1:i+1]
-                last_5_characters = axis[i-4:i+1]
-                if current_character == ',':
-                    split_axis.append(
-                        (AxisSeparators.Comma, axis[last_character:i].strip()))
-                    last_character = i + 1
-                elif last_5_characters == 'net({':
-                    split_axis.append(
-                        (AxisSeparators.NetStart, axis[last_character:i-4].strip()))
-                    last_character = i + 1
-                elif last_2_characters == '})':
-                    split_axis.append(
-                        (AxisSeparators.NetEnd, axis[last_character:i-1].strip()))
-                    last_character = i + 1
-
-        if last_character < len(axis):
-            split_axis.append(axis[last_character:])
-
-        return split_axis
-
-    def _build_tree(self, split_axis):
-
-        root_node = CodeplanNode(
-            code='(root)',
-            label='',
-            node_type=CodeplanNodeTypes.Root,
-            parent=None,
-            level=0
-        )
-        current_parent = root_node
-
-        for a in split_axis:
-            if a[1] == 'base()':
-                pass
-            elif a[0] == AxisSeparators.Comma and a[1]:
-                # regular element
-                code, label = a[1].split(sep=' ', maxsplit=1)
-                node = CodeplanNode(
-                    code=code.strip(),
-                    label=label.strip()[1:-1].replace("''", "'"),
-                    node_type=CodeplanNodeTypes.Regular,
-                    parent=current_parent,
-                    level=current_parent.level + 1
-                )
-                current_parent.children.append(node)
-            elif a[0] == AxisSeparators.NetStart:
-                # net element
-                code, label = a[1].split(sep=' ', maxsplit=1)
-                node = CodeplanNode(
-                    code=code.strip(),
-                    label=label.strip()[1:-1].replace("''", "'"),
-                    node_type=CodeplanNodeTypes.Net,
-                    parent=current_parent,
-                    level=current_parent.level + 1
-                )
-                current_parent.children.append(node)
-                current_parent = node
-            elif a[0] == AxisSeparators.NetEnd:
-                if a[1]:
-                    code, label = a[1].split(sep=' ', maxsplit=1)
-                    node = CodeplanNode(
-                        code=code.strip(),
-                        label=label.strip()[1:-1].replace("''", "'"),
-                        node_type=CodeplanNodeTypes.Regular,
-                        parent=current_parent,
-                        level=current_parent.level + 1
-                    )
-                    current_parent.children.append(node)
-                current_parent = current_parent.parent
-        return root_node
 
     @property
     def is_valid(self):
@@ -515,7 +640,7 @@ class MDDCodeplan:
 
     @property
     def net_elements(self):
-        return [n for n in self.tree.flat_children if n.node_type == CodeplanNodeTypes.Net]
+        return [n for n in self.tree.flat_children if n.function == 'net()']
 
     @property
     def variables(self):
@@ -675,55 +800,7 @@ class XLCodeplan:
     @property
     def tree(self):
         if self._tree is None:
-
-            self._tree = CodeplanNode(
-                code='(root)',
-                label='',
-                node_type=CodeplanNodeTypes.Root,
-                parent=None,
-                level=0
-            )
-            current_parent = self._tree
-
-            for row in self.rows:
-                if row.row_type == XLCodeplanRowTypes.NetStart:
-                    node = CodeplanNode(
-                        code=f'net{row.index}',
-                        label=row.label,
-                        node_type=CodeplanNodeTypes.Net,
-                        parent=current_parent,
-                        level=current_parent.level + 1)
-                    current_parent.children.append(node)
-                    current_parent = node
-                elif row.row_type == XLCodeplanRowTypes.NetEnd:
-                    level_difference = current_parent.level - len(row.code) + 1
-                    while level_difference:
-                        current_parent = current_parent.parent
-                        level_difference -= 1
-                elif row.row_type == XLCodeplanRowTypes.Regular:
-                    node = CodeplanNode(
-                        code=f'{CODE_PREFIX}{row.code}',
-                        label=row.label,
-                        node_type=CodeplanNodeTypes.Regular,
-                        parent=current_parent,
-                        level=current_parent.level + 1)
-                    current_parent.children.append(node)
-                elif row.row_type == XLCodeplanRowTypes.Combine:
-                    combine_node = CodeplanNode(
-                        code=f'comb{row.index}',
-                        label=row.label,
-                        node_type=CodeplanNodeTypes.Combine,
-                        parent=current_parent,
-                        level=current_parent.level + 1)
-                    for c in row.combine_codes:
-                        child = CodeplanNode(
-                            code=f'{CODE_PREFIX}{c}',
-                            label='',
-                            node_type=CodeplanNodeTypes.Regular,
-                            parent=combine_node,
-                            level=combine_node.level + 1)
-                        combine_node.children.append(child)
-                    current_parent.children.append(combine_node)
+            self._tree = CodeplanNode.from_excel(self.rows)
 
         return self._tree
 
@@ -804,10 +881,6 @@ class XLCodeplan:
     @property
     def combine_elements(self):
         return [n for n in self.tree.flat_children if n.node_type == CodeplanNodeTypes.Combine]
-
-    def print_tree(self):
-        for node in self.tree.flat_children:
-            print(f'{"    "*(node.level - 1)}{node.code} - {node.label}')
 
     def print_summary(self):
         error_string = '\n'.join(self.errors) if self.errors else '(not found)'
@@ -1143,6 +1216,9 @@ class CFileManager:
             new_assignments.append(new_assignment)
         return f"UPDATE vdata SET {', '.join(new_assignments)} WHERE {criteria}"
 
+def update_cfile(cfile_path, variable_map, category_map, new_path):
+    cfile_manager = CFileManager(cfile_path, variable_map, category_map)
+    cfile_manager.save_cfile(new_path)
 
 ############################################################################
 #
@@ -1169,11 +1245,8 @@ def copy_mdd_ddf(input_path, output_path):
     mdd.Save()
     mdd.Close()
         
-def update_cfile(cfile_path, variable_map, category_map, new_path):
-    cfile_manager = CFileManager(cfile_path, variable_map, category_map)
-    cfile_manager.save_cfile(new_path)
 
-def update_master_with_mdd_codeplan_with_adapter(master_path, codeplan_path, adapter):
+def update_master_with_mdd_codeplan_with_adapter(master_path, codeplan_path, adapter, total_label='Sigma'):
 
     master_mdd = client.Dispatch('MDM.Document')
     master_mdd.Open(master_path)
@@ -1244,9 +1317,10 @@ def update_master_with_mdd_codeplan_with_adapter(master_path, codeplan_path, ada
     # # updates axis expressions
     for m in adapter:
         if m.mdd_name and m.master_name and m.mdd_name in codeplan_file:
+            codeplan_axis = codeplan_file[m.mdd_name].tree.get_tom_axis(total_label)
             for f in master_mdd.Fields.Expanded:
                 if f.ObjectTypeValue == ObjectTypesConstants.mtVariable and (f.Elements.ReferenceName == m.master_name or (f.Elements.IsReference and f.Elements.Reference.Name == m.master_name) or (f.Elements.Count > 0 and f.Elements[0].ReferenceName == m.master_name)):
-                    f.AxisExpression = codeplan_file[m.mdd_name].axis
+                    f.AxisExpression = codeplan_axis
 
     master_mdd.CategoryMap.AutoAssignValues()
     master_mdd.Save()
