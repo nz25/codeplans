@@ -285,7 +285,6 @@ class CodeplanNode:
 
         return root
 
-
     @property
     def axis(self):
         if self._axis == None:
@@ -1287,13 +1286,19 @@ def update_master_with_mdd_codeplan_with_adapter(master_path, codeplan_path, ada
                     master_element.Label = codeplan_element.label
 
     # update fields
+    #original_variables=werden mit .Coding angelegt
+    #new_variables=müssen neu angelegt werden
     original_variables = [v for v in codeplan_file.variables if v.label + HELPER_FIELD not in codeplan_file.variable_map]
-    new_variables =  [v for v in codeplan_file.variables if v.label + HELPER_FIELD in codeplan_file.variable_map]
+    new_variables =      [v for v in codeplan_file.variables if v.label + HELPER_FIELD in codeplan_file.variable_map]
 
     # creates .Coding variable if doesn't exist
     for v in original_variables:
         if not master_mdd.Fields.Expanded.Exist(v.field_name + HELPER_FIELD):
-            master_type = [m.master_name for m in adapter if m.mdd_name == v.type_name][0]
+            master_types = [m.master_name for m in adapter if m.mdd_name == v.type_name]
+            if not master_types:
+                raise ValueError(f'{m.mdd_name} is missing in ADAPTER')
+            else:
+                master_type = master_types[0]
             create_variable(
                 mdd = master_mdd,
                 parent_collection = master_mdd.Fields[v.field_name].HelperFields,
