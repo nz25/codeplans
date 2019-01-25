@@ -2,18 +2,18 @@ from enum import IntEnum
 from win32com import client
 from openpyxl import load_workbook
 from collections import defaultdict, namedtuple
+from shutil import copyfile
+from adodbapi import connect
+from xml.etree import ElementTree
+
+############################################################################
+#
+#                         CONSTANTS / ENUMERATIONS
+#
+############################################################################
 
 CODE_PREFIX = 'CB_'
 HELPER_FIELD =  '.Coding'
-
-def sort_element(code):
-    return int(code[len(CODE_PREFIX):])
-
-############################################################################
-#
-#                               ENUMERATIONS
-#
-############################################################################
 
 class CodeplanNodeTypes(IntEnum):
     Root = 0
@@ -21,23 +21,19 @@ class CodeplanNodeTypes(IntEnum):
     Combine = 2
     Net = 3
 
-
 class CodeplanSources(IntEnum):
     XL = 1
     MDD = 2
     Master = 3
 
-
 class CFileSources(IntEnum):
     Verbaco = 1
     Ascribe = 2
-
 
 class AxisSeparators(IntEnum):
     Comma = 1
     NetStart = 2
     NetEnd = 3
-
 
 class XLCodeplanRowTypes(IntEnum):
     Invalid = 0
@@ -45,7 +41,6 @@ class XLCodeplanRowTypes(IntEnum):
     Combine = 2
     NetStart = 3
     NetEnd = 4
-
 
 class ObjectTypesConstants(IntEnum):
     mtVariable = 0
@@ -102,7 +97,6 @@ class ObjectTypesConstants(IntEnum):
     mtDBQuestionDataProvider = 52
     mtUnknown = 65535
 
-
 class DataTypeConstants(IntEnum):
     mtNone = 0
     mtLong = 1
@@ -134,13 +128,11 @@ class openConstants(IntEnum):
      oNOSAVE = 3
 
 
-
 ############################################################################
 #
 #                               CODEPLAN
 #
 ############################################################################
-
 
 class CodeplanNode:
 
@@ -185,7 +177,6 @@ class CodeplanNode:
     def __repr__(self):
         return f"CodeplanNode(code='{self.code}', label='{self.label}', node_type={self.node_type}, parent={self.parent}, level={self.level}), len={len(self.children)}"
 
-
 class CodeplanElement:
 
     def __init__(self, code, label, double=False):
@@ -200,43 +191,53 @@ class CodeplanElement:
         return f"CodeplanElement(code='{self.code}', label='{self.label}', double={self.double})"
 
 
-
 ############################################################################
 #
 #                               MDD CODEPLAN
 #
 ############################################################################
 
-class MDDFile():
+class MDDFile:
 
-    def __init__(self, mdd_path,):
-        self.mdd_path = mdd_path
-        self._read_mdd()
-        self._variable_map = None
-        self._errors = None
-        self._is_valid = None
+    def __init__(self, mdd_path, *, parser='xml'):
 
-    def _read_mdd(self):
+        self.path = mdd_path
+        self.parser = parser
+
+        # reads meta data from mdd
+        if parser == 'xml':
+            self.types, self.variables = self._read_mdd_from_xml() 
+        elif parser == 'com':
+           self.types, self.variables = self._read_mdd_from_com() 
+ 
+
+    def _read_mdd_from_com(self):
+
+        # parser, which uses MDM.Document COM Object
+        # to access types and variables
+
+        # opens mdd
         mdd = client.Dispatch('MDM.Document')
-        mdd.Open(self.mdd_path, mode=openConstants.oREAD)
-        self._codeplans = [
+        mdd.Open(self.path, mode=openConstants.oREAD)
+
+        # fills types
+        types = [
             MDDCodeplan(
                 name=t.Name,
                 elements=[
-                    CodeplanElement(
-                        code=e.Name,
-                        label=e.label
-                    )
+                    CodeplanElement(code=e.Name, label=e.label)
                     for e in t.Elements
                 ],
                 axis={f.AxisExpression
                     for f in mdd.Fields
                     if f.ObjectTypeValue == ObjectTypesConstants.mtVariable
                         and f.Elements.Reference.Name == t.Name
-                }.pop()
-            ) for t in mdd.Types
-        ]
-        self.variables = [
+                }.pop(),
+                mdd_file=self
+            ) for t in mdd.Types]
+
+        # fills variables
+        variables = [
             MDDVariable(
                 name=f.Name,
                 label=f.Label,
@@ -247,154 +248,151 @@ class MDDFile():
             if f.ObjectTypeValue == ObjectTypesConstants.mtVariable
         ]
 
+        # closes mdd
         mdd.Close()
+
+        return types, variables
+
+
+    def _read_mdd_from_xml(self):
+
+        # parser, which uses XML from MDD file
+        # to access types and variables
+
+        types = []
+        variables = []
+        
+        # root node for variables and types is xml\mdm:metadata\definition
+        tree = ElementTree.parse(self.path)
+        root = tree.getroot()[0].find('definition')
+
+        # root node contains elements of 2 types:
+        # 'variable' for variables
+        # 'categories' for types
+        for node in root:
+            # parsing logic for variables
+            if node.tag == 'variable':
+                name = node.get('name')
+                var_type = int(node.get('type'))
+                # labels element may contain multiple labels 
+                # for different label types, contexts and languages (LCL)
+                # parser just uses 1st label it encounters
+                label = node.find('labels')[0].text
+                ref_name = node.find('categories').get('ref_name')
+                axis = node.find('axis').get('expression')
+                if var_type == DataTypeConstants.mtCategorical and ref_name:
+                    variables.append(MDDVariable(name, label, ref_name, axis))
+            # parsing logic for types
+            elif node.tag == 'categories':
+                name = node.get('name')
+                elements = [
+                    CodeplanElement(
+                        code=element.get('name'),
+                        label=element.find('labels')[0].text
+                    )
+                    for element in node
+                    if element.tag == 'category'
+                ]
+                # sets axis expression for type based on the 1st variable
+                # which belongs to this type
+                # assumes variables collection is completely populated
+                axis = {v.axis for v in variables if v.type_name == name}.pop()
+                types.append(MDDCodeplan(name, elements, axis, self))
+
+        return types, variables
 
     @property
     def variable_map(self):
-        
-        if self._variable_map is None:
 
-            self._variable_map = {}
+        # populates field list from variable list in 3 stages:
+        # - saves list of variables per field
+        # - saves list of types per field
+        # - merges both results in fields list
 
-            # saves list of variables per field
-            field_variables = defaultdict(list)
-            for v in self.variables:
-                field_variables[v.field_name].append(v)
+        variables_per_field = defaultdict(list)
+        for v in self.variables:
+            variables_per_field[v.field_name].append(v)
 
-            # saves list of types per field
-            field_types = defaultdict(set)
-            for v in self.variables:
-                field_types[v.field_name].add(v.type_name)
+        types_per_field = defaultdict(set)
+        for v in self.variables:
+            types_per_field[v.field_name].add(v.type_name)
 
-            # merges both results in temporary fields list
-            Field = namedtuple('Field', 'name variables types')
-            fields = [
-                Field(
-                    name=field_name,
-                    variables=variables,
-                    types=field_types[field_name]
-                )
-                for field_name, variables
-                in field_variables.items()
-            ]
-
-            multitype_variables = [
-                v
-                for f in fields
-                if len(f.types) > 1
-                for v in f.variables
-            ]
-
-            for v in self.variables:
-                if v in multitype_variables:
-                    self._variable_map[f'{v.label}'] = v.compliant_name
-
-        return self._variable_map
-
-    def append_mdd(self, path):
-
-        mdd = client.Dispatch('MDM.Document')
-        mdd.Open(path, mode=openConstants.oREAD)
-
-        new_codeplans = [
-            MDDCodeplan(
-                name=t.Name,
-                elements=[
-                    CodeplanElement(
-                        code=e.Name,
-                        label=e.label)
-                    for e in t.Elements
-                    ],
-                axis={f.AxisExpression
-                    for f in mdd.Fields
-                    if f.ObjectTypeValue == ObjectTypesConstants.mtVariable
-                        and f.Elements.Reference.Name == t.Name
-                }.pop())
-            for t in mdd.Types
-            if t.Name not in [cp.name for cp in self._codeplans]
-        ]
-        self._codeplans.extend(new_codeplans)
-
-        new_variables = [
-            MDDVariable(
-                name=f.Name,
-                label=f.Label,
-                type_name=f.Elements.Reference.Name,
-                axis=f.AxisExpression
+        Field = namedtuple('Field', 'name variables types')
+        fields = [
+            Field(
+                name=k,
+                variables=v,
+                types=types_per_field[k]
             )
-            for f in mdd.Fields
-            if f.ObjectTypeValue == ObjectTypesConstants.mtVariable
-                and f.Name not in [v.name for v in self.variables]
+            for k, v in variables_per_field.items()
         ]
-        self.variables.extend(new_variables)
 
-        mdd.Close()
-        self._variable_map = None
-        self._errors = None
-        self._is_valid = None
+        # checks if there are variables, which belong to the same field
+        # but use different types.
+        # creates variable map, for renaming such variables in cfile
 
-    def save_mdd(self, path):
+        return {
+            f'{v.label}{HELPER_FIELD}': v.compliant_name
+                for f in fields
+                for v in f.variables
+                if len(f.types) > 1
+        }
+
+    def save_variable_map(self, path):
+        with open(path, mode='w', encoding='utf-8') as f:
+            for vm in self.variable_map.items():
+                f.write(','.join(vm) + '\n')
+
+    def save_as(self, path):
+
+        self.path = path
+        
+        # saves types and elements lists in mdd file
+        
         mdd = client.Dispatch('MDM.Document')
         mdd.IncludeSystemVariables = False
-        for cp in self._codeplans:
-            new_list = mdd.CreateElements(cp.name)
-            for element in cp:
+        for t in self.types:
+            new_list = mdd.CreateElements(t.name)
+            for element in t:
                 new_element = mdd.CreateElement(element.code, element.label)
                 new_element.Type = ElementTypeConstants.mtCategory
                 new_list.Add(new_element)
             mdd.Types.Add(new_list)
             
         for v in self.variables:
-            new_variable = mdd.CreateVariable(v.name, self.variable_map.get(v.label, v.label + HELPER_FIELD))
+            new_variable = mdd.CreateVariable(v.name, v.label)
             new_variable.DataType = DataTypeConstants.mtCategorical
             new_variable.Elements.ReferenceName = v.type_name
-            new_variable.AxisExpression = [cp for cp in self._codeplans if cp.name == v.type_name][0].axis
+            new_variable.AxisExpression = self[v.type_name].axis
             mdd.Fields.Add(new_variable)
 
         mdd.CategoryMap.AutoAssignValues()
         mdd.Save(path)
         mdd.Close()
 
-    @property
-    def errors(self):
-        if self._errors is None:
-            self._errors = [f'Codeplan "{codeplan.name}": {error}'
-                            for codeplan in self._codeplans if not codeplan.is_valid
-                            for error in codeplan.errors]
-        return self._errors
-
-    @property
-    def is_valid(self):
-        if self._is_valid is None:
-            self._is_valid = False if self.errors else True
-        return bool(self._is_valid)
-
-    def __len__(self):
-        return len(self._codeplans)
-
-    def __getitem__(self, i):
-        if isinstance(i, str):
-            return [cp for cp in self._codeplans if cp.name == i][0]
+    def __getitem__(self, value):
+        if isinstance(value, str):
+            return [t for t in self.types if t.name == value][0]
         else:
-            return self._codeplans[i]
-
-    def __repr__(self):
-        return f"MDDFile(path='{self.mdd_path}')"
+            return self.types[value]        
 
     def __contains__(self, value):
-        return bool([cp for cp in self._codeplans if cp.name == str(value)])
+        return bool([t for t in self.types if t.name == value])
+
+
+    def __repr__(self):
+        return f"MDDFile(path='{self.path}')"
 
 class MDDCodeplan:
 
-    def __init__(self, name, elements, axis):
+    def __init__(self, name, elements, axis, mdd_file):
         self.name = name
-        self._elements = elements
+        self.mdd_file = mdd_file
+        self.elements = elements
         self.axis = axis
         self._errors = None
         self._tree = None
         self._is_valid = None
-        self.variable_map = {}
-        self.category_map = {}
 
     @property
     def errors(self):
@@ -404,21 +402,17 @@ class MDDCodeplan:
 
     @property
     def tree(self):
-        if self._tree is None:
-            axis = self.axis[1:-1]
-            label_bitmap = self._build_label_bitmap(axis)
-            split_axis = self._split_axis(axis, label_bitmap)
+        if self._tree is None and self.axis:
+            self.axis = self.axis[1:-1]
+            label_bitmap = self._build_label_bitmap(self.axis)
+            split_axis = self._split_axis(self.axis, label_bitmap)
             self._tree = self._build_tree(split_axis)
 
         return self._tree
 
-    @property
-    def elements(self):
-        return self._elements
-
-    @property
-    def flat_tree(self):
-        return self.tree.flat_children
+    @tree.setter
+    def tree(self, value):
+        self._tree = value
 
     def _build_label_bitmap(self, axis):
         in_label = False
@@ -521,75 +515,31 @@ class MDDCodeplan:
 
     @property
     def net_elements(self):
-        return [n for n in self.flat_tree if n.node_type == CodeplanNodeTypes.Net]
+        return [n for n in self.tree.flat_children if n.node_type == CodeplanNodeTypes.Net]
 
-    def get_element(self, code):
-        elements = [e for e in self._elements if e.code == code]
-        if elements:
-            return elements[0]
-        else:
-            raise ValueError(f"Element '{code}' not found")
+    @property
+    def variables(self):
+        return [v for v in self.mdd_file.variables if v.type_name == self.name]
 
     def print_tree(self):
         for node in self.tree.flat_children:
             print(f'{"    " * (node.level - 1)}{node.code} - {node.label}')
 
-    def inject(self, xl_codeplan):
-
-        if self.errors:
-            errors = '\n'.join(self.errors)
-            raise ValueError(f'''Errors in Codeplan '{self.name}': {errors}''')
-        if xl_codeplan.errors:
-            errors = '\n'.join(self.errors)
-            raise ValueError(f'''Errors in Excel Codeplan '{xl_codeplan.name}': {errors}''')
-
-        xl_elements = {e.code for e in xl_codeplan.elements}
-        mdd_elements = {e.code for e in self.elements}
-        missing_in_mdd = sorted(xl_elements - mdd_elements, key=sort_element)
-        missing_in_xl = sorted(mdd_elements - xl_elements, key=sort_element)
-        
-        if missing_in_mdd:
-            #raise ValueError(f"Excel elements missing in MDD: {','.join(missing_in_mdd)}")
-            print(f'XL elements missing in MDD: {",".join(missing_in_mdd)}')
-        if missing_in_xl:
-            if xl_codeplan.other_element:
-                print(f'MDD elements missing in Excel: {",".join(missing_in_xl)}')
-                self.category_map = {e: xl_codeplan.other_element for e in missing_in_xl}
-            else:
-                raise ValueError(f"'Other element' not set in excel codeplan '{xl_codeplan.name}'")
-
-        exist_in_both = sorted(mdd_elements & xl_elements, key=sort_element)
-        for e in exist_in_both:
-            mdd_element = self.get_element(e)
-            xl_element = xl_codeplan.get_element(e)
-            if mdd_element.label != xl_element.label:
-                print(f'Overwriting label for {e}: "{mdd_element.label}" -> "{xl_element.label}"')
-            
-        self._elements = xl_codeplan.elements
-        self._tree = xl_codeplan.tree
-        self._flat_tree = xl_codeplan.flat_tree
-        self._axis = xl_codeplan.axis
-
     def print_summary(self):
         error_string = '\n'.join(self.errors) if self.errors else '(not found)'
-        
-        print(f'''Name: {self.name}
-# Codes: {len(self.elements)}
-# Nets: {len(self.net_elements)}
-Errors: {error_string}''')
+        print(f'''Name: {self.name}\n# Codes: {len(self.elements)}\n# Nets: {len(self.net_elements)}\nErrors: {error_string}''')
 
     def __len__(self):
-        return len(self._elements)
+        return len(self.elements)
 
     def __getitem__(self, i):
         if isinstance(i, str):
-            return [e for e in self._elements if e.code == i][0]
+            return [e for e in self.elements if e.code == i][0]
         else:
-            return self._elements[i]
+            return self.elements[i]
 
     def __repr__(self):
         return f"MDDCodeplan(name='{self.name}'), len={len(self)}"
-
 
 class MDDVariable:
 
@@ -632,30 +582,54 @@ class MDDVariable:
         return f"MDDVariable(name='{self.name}'), label='{self.label}', type_name='{self.type_name}'"
 
 
-
 ############################################################################
 #
 #                               EXCEL CODEPLAN
 #
 ############################################################################
 
-class XLCodeplan():
+class XLFile:
 
-    def __init__(self, path, sheet_name, *, code_column=1):
+    def __init__(self, path, *, code_column=1):
+        
         self.path = path
-        self.name = sheet_name
         self.code_column = code_column
-        worksheet = load_workbook(self.path, read_only=True, data_only=True)[sheet_name]
-        all_rows = [
-            XLCodeplanRow(
-                code=row[self.code_column - 1].value,
-                label=row[self.code_column].value,
-                index=index
-            )
-            for index, row in enumerate(worksheet, start=1)
+        workbook = load_workbook(self.path, read_only=True, data_only=True)
+        self.codeplans = [
+            XLCodeplan(
+                name=sheet.title,
+                rows = [
+                    XLCodeplanRow(
+                        code=row[self.code_column - 1].value,
+                        label=row[self.code_column].value,
+                        index=index
+                    )
+                    for index, row in enumerate(sheet, start=1)],
+                xl_file = self)
+            for sheet in workbook
         ]
-        self._rows = self._trim_rows(all_rows)
-        self._other_element = None
+        self.category_map = []
+        workbook.close()
+
+    def __getitem__(self, value):
+        if isinstance(value, str):
+            return [t for t in self.codeplans if t.name == value][0]
+        else:
+            return self.codeplans[value]        
+
+    def __contains__(self, value):
+        return bool([t for t in self.codeplans if t.name == value])
+
+    def __repr__(self):
+        return f'XLFile(path="{self.path}")'
+
+class XLCodeplan:
+
+    def __init__(self, name, rows, xl_file, *, other_element=''):
+        self.name =name
+        self.rows = self._trim_rows(rows)
+        self.other_element = other_element
+        self.xl_file = xl_file
         self._elements = None
         self._tree = None
         self._errors = None
@@ -675,19 +649,12 @@ class XLCodeplan():
                 break
         return rows[first_valid_row - 1:last_valid_row]
 
-    @property
-    def other_element(self):
-        return self._other_element
-    
-    @other_element.setter
-    def other_element(self, value):
-        self._other_element = value
 
     @property
     def elements(self):
         if self._elements is None:
             elements_with_label_list = defaultdict(list)
-            for row in self._rows:
+            for row in self.rows:
                 if row.row_type == XLCodeplanRowTypes.Regular:
                     elements_with_label_list[row.code].append(row.label)
                 elif row.row_type == XLCodeplanRowTypes.Combine:
@@ -718,7 +685,7 @@ class XLCodeplan():
             )
             current_parent = self._tree
 
-            for row in self._rows:
+            for row in self.rows:
                 if row.row_type == XLCodeplanRowTypes.NetStart:
                     node = CodeplanNode(
                         code=f'net{row.index}',
@@ -760,13 +727,11 @@ class XLCodeplan():
 
         return self._tree
 
-    @property
-    def flat_tree(self):
-        return self.tree.flat_children
 
     @property
     def axis(self):
         return self.tree.axis
+
 
     @property
     def errors(self):
@@ -774,19 +739,20 @@ class XLCodeplan():
         if self._errors is None:
 
             self._errors = []
+
             # Checks if codeplan is empty
-            if len(self._rows) == 0:
+            if len(self.rows) == 0:
                 self._errors.append('Empty codeplan')
 
             # Check if codes are valid
             self._errors.extend([f'Invalid code "{row.code}" in row {row.index}'
-                                 for row in self._rows if not row.is_valid])
+                                 for row in self.rows if not row.is_valid])
 
             # Structural validation
             current_level = 0
             current_elements = []
             last_row_type = XLCodeplanRowTypes.Invalid
-            for row in self._rows:
+            for row in self.rows:
                 if row.row_type == XLCodeplanRowTypes.NetStart:
                     current_elements = []
                     if len(row.code) != current_level + 1:
@@ -824,7 +790,7 @@ class XLCodeplan():
     def double_elements(self):
         seen = set()
         duplicates = set()
-        for node in self.flat_tree:
+        for node in self.tree.flat_children:
             if node.code not in seen:
                 seen.add(node.code)
             else:
@@ -833,21 +799,14 @@ class XLCodeplan():
 
     @property
     def net_elements(self):
-        return [n for n in self.flat_tree if n.node_type == CodeplanNodeTypes.Net]
+        return [n for n in self.tree.flat_children if n.node_type == CodeplanNodeTypes.Net]
 
     @property
     def combine_elements(self):
-        return [n for n in self.flat_tree if n.node_type == CodeplanNodeTypes.Combine]
-
-    def get_element(self, code):
-        elements = [e for e in self._elements if e.code == code]
-        if elements:
-            return elements[0]
-        else:
-            raise ValueError(f"Element '{code}' not found")
+        return [n for n in self.tree.flat_children if n.node_type == CodeplanNodeTypes.Combine]
 
     def print_tree(self):
-        for node in self.flat_tree:
+        for node in self.tree.flat_children:
             print(f'{"    "*(node.level - 1)}{node.code} - {node.label}')
 
     def print_summary(self):
@@ -855,27 +814,21 @@ class XLCodeplan():
         double_elements = self.double_elements
         double_elements_string = ','.join(double_elements) if double_elements else '(not found)'
         
-        print(f'''Name: {self.name}
-# Codes: {len(self.elements)}
-# Nets: {len(self.net_elements)}
-# Combines: {len(self.combine_elements)}
-Double codes: {double_elements_string}
-Errors: {error_string}''')
+        print(f'''Name: {self.name}\n# Codes: {len(self.elements)}\n# Nets: {len(self.net_elements)}\n# Combines: {len(self.combine_elements)}\nDouble codes: {double_elements_string}\nErrors: {error_string}''')
 
     def __len__(self):
         return len(self.elements)
 
     def __getitem__(self, i):
         if isinstance(i, str):
-            return [e for e in self._elements if e.code == i][0]
+            return [e for e in self.elements if e.code == i][0]
         else:
-            return self._elements[i]
+            return self.elements[i]
 
     def __repr__(self):
         return f"XLCodeplan(name='{self.name}'), len={len(self)}"
 
-
-class XLCodeplanRow():
+class XLCodeplanRow:
 
     def __init__(self, code, label, index):
         self.code = str(code).strip() if code is not None else ''
@@ -930,53 +883,260 @@ class XLCodeplanRow():
         return f"XLCodeplanRow(code='{self.code}', label='{self.label}', index={self.index})"
 
 
+############################################################################
+#
+#                                MERGERS
+#
+############################################################################
+
+class MDDXLFileMerger:
+
+    def __init__(self, mdd_file, xl_file, mdd_xl_map, *, verbose = False):
+
+        # mdd_xl_map is named_tuple with 3 fields:
+        # mdd_name xl_name other_element
+
+        self.mdd_file = mdd_file
+        self.xl_file = xl_file
+        self.mdd_xl_map = mdd_xl_map
+        self.codeplan_mergers = []
+
+        if verbose:
+            print('Initializing MDDXLFileMerger...')
+            mdd_codeplans_missing_in_map = {t.name for t in self.mdd_file.types if t.name not in {m.mdd_name for m in self.mdd_xl_map}}
+            print('MDD types missing in the map:')
+            print(','.join(mdd_codeplans_missing_in_map))
+            xl_codeplans_missing_in_map = {cp.name for cp in self.xl_file.codeplans if cp.name not in {m.xl_name for m in self.mdd_xl_map}}
+            print('XL types missing in the map:')
+            print(','.join(xl_codeplans_missing_in_map))
+
+        for m in mdd_xl_map:
+            if m.mdd_name and m.xl_name and m.mdd_name in mdd_file and m.xl_name in xl_file:
+                mdd_codeplan = mdd_file[m.mdd_name]
+                xl_codeplan = xl_file[m.xl_name]
+                xl_codeplan.other_element = m.other_element
+                self.codeplan_mergers.append(
+                    CodeplanMerger(mdd_codeplan, xl_codeplan, self)
+                )
+        self.category_map = []
+
+    def merge_all(self):
+        adjusted_types = []
+        for m in self.codeplan_mergers:
+            adjusted_types.append(m.merge())
+            self.category_map.extend(m.category_map)
+        return self.mdd_file
+
+    def save_category_map(self, path):
+        with open(path, mode='w', encoding='utf-8') as f:
+            for cm in self.category_map:
+                f.write(','.join(cm) + '\n')
+
+class MDDFileMerger:
+
+    # merging rules are as follows:
+    # - doesn't change types in master mdd
+    # - appends types from slave mdd, which don't exist in master
+    # - doesn't change variables in master mdd
+    # - appends new varaibles from slave mdd
+    # - uses axis expression from master for newly added variables
+    #   if they use list, which existed in master
+
+    def __init__(self, master_mdd_file, slave_mdd_file):
+
+        # expects 2 MDDFile types parameters
+        self.master = master_mdd_file
+        self.slave = slave_mdd_file
+
+        
+        # types which missing in master
+        self.new_types = [t for t in self.slave.types
+            if t.name not in [mt.name for mt in self.master.types]
+        ]
+
+        # variables which missing in master
+        self.new_variables = [v for v in self.slave.variables
+            if v.name not in [mv.name for mv in self.master.variables]
+        ]
+
+        # adjusts axis expressions in new variables
+        for v in self.new_variables:
+            if v.type_name in [t.name for t in self.master.types]:
+                v.axis = self.master[v.type_name].axis
+
+
+    @property
+    def report(self):
+        
+        report = ''
+
+        # outputs new types
+        report += 'New types:\n'
+        for t in self.new_types:
+            report += f'{t}\n'
+
+        # outputs new variables
+        report += 'New variables:\n'
+        for v in self.new_variables:
+            report += f'{v}\n'
+
+        # returns report
+        return report
+
+
+    def merge(self):
+
+        # adjusts and returns master
+        self.master.types.extend(self.new_types)
+        self.master.variables.extend(self.new_variables)
+        return self.master
+
+class CodeplanMerger:
+
+    # merging rules are as follows:
+    # - excel defines set of elements
+    # - excel defines labels for elements
+    # - excel defines codeplan structure (axis)
+    # - if there are elements in mdd, which are missing in 
+    #   excel, category_map is created, which maps, all
+    #   missing element to other_element
+
+    def __init__(self, mdd_codeplan, xl_codeplan, file_merger):
+
+        # expects MDDCodeplan and XLCodeplan types parameters
+        self.mdd_codeplan = mdd_codeplan
+        self.xl_codeplan = xl_codeplan
+        self.file_merger = file_merger
+        self.other_element = xl_codeplan.other_element
+
+        # comparing mdd and xl elements
+        self.xl_elements = {e.code for e in xl_codeplan.elements}
+        self.mdd_elements = {e.code for e in mdd_codeplan.elements}
+        self.missing_in_mdd = sorted(self.xl_elements - self.mdd_elements, key=sort_element)
+        self.missing_in_xl = sorted(self.mdd_elements - self.xl_elements, key=sort_element)
+        self.exist_in_both = sorted(self.mdd_elements & self.xl_elements, key=sort_element)
+
+        # check if there are conditions which prohibit merging
+        if self.mdd_codeplan.errors or xl_codeplan.errors:
+            self.mergeable = False
+        elif self.missing_in_mdd or (self.missing_in_xl and not self.other_element):
+            self.mergeable = False
+        else:
+            self.mergeable = True
+
+    @property
+    def report(self):
+
+        report = ''
+    
+        # check for errors in mdd codeplan and xl codeplan
+        mdd_errors = '\n'.join(self.mdd_codeplan.errors)
+        xl_errors = '\n'.join(self.xl_codeplan.errors)
+        if mdd_errors:
+            report += f'Errors in MDD Codeplan "{self.mdd_codeplan.name}": {mdd_errors}\n'
+        if xl_errors:
+            report += f'Errors in XL Codeplan "{self.xl_codeplan.name}": {xl_errors}\n'
+
+        # check for errors in mdd codeplan and xl codeplan
+        if self.missing_in_mdd:
+            report += f'XL elements missing in MDD: {",".join(self.missing_in_mdd)}\n'
+        if self.missing_in_xl:
+            if self.other_element:
+                report += f'MDD elements missing in Excel: {",".join(self.missing_in_xl)}\n'
+            else:
+                report += f'"Other element" not set in excel codeplan {self.xl_codeplan.name}\n'
+
+        # checks for differences in labels
+        for e in self.exist_in_both:
+            mdd_element = self.mdd_codeplan[e]
+            xl_element = self.xl_codeplan[e]
+            if mdd_element.label != xl_element.label:
+                report += f'Label differences for {e}: "{mdd_element.label} (MDD)" -> "{xl_element.label}" (XL)\n'
+
+        # returns report
+        return report
+
+    @property
+    def category_map(self):
+
+        return [
+            (f'{v.label}{HELPER_FIELD}',
+                old_code,
+                self.other_element)
+            for v in self.mdd_codeplan.variables
+            for old_code in self.missing_in_xl
+        ]
+    
+    def merge(self):
+
+        # merges codeplans and returns mdd codeplan
+
+        if self.mergeable:
+            self.mdd_codeplan.elements = self.xl_codeplan.elements
+            self.mdd_codeplan.tree = self.xl_codeplan.tree
+            self.mdd_codeplan.axis = self.xl_codeplan.axis
+            return self.mdd_codeplan
+
+        else:
+            raise ValueError('Not mergeable. See report() for details')
+
+
+############################################################################
+#
+#                                 CFILE
+#
+############################################################################
+
 class CFileManager:
 
-    def __init__(self, mdd_file, cfile_path):
-        self.mdd_file = mdd_file
+    def __init__(self, cfile_path, variable_map_path, category_map_path, *, cfile_source=CFileSources.Verbaco):
         self.cfile_path = cfile_path
 
+        self.variable_map = {}
+        with open(variable_map_path, mode='r', encoding='utf-8') as f:
+            for row in f:
+                old_var, new_var = row.strip('\n').split(',')
+                self.variable_map[old_var] = new_var
 
-    def save_cfile(self, new_path, *, cfile_source=CFileSources.Verbaco):
+        self.category_map = defaultdict(dict)
+        with open(category_map_path, mode='r', encoding='utf-8') as f:
+            for row in f:
+                variable, old_code, new_code = row.strip('\n').split(',')
+                self.category_map[variable][old_code] = new_code
 
-        variable_map = {old + HELPER_FIELD: new for old, new in self.mdd_file.variable_map.items()}
-        category_map = {v.label + HELPER_FIELD: {**cp.category_map}
-            for cp in self.mdd_file
-            for v in self.mdd_file.variables
-            if v.type_name == cp.name}
+        self.cfile_source = cfile_source
 
+    def save_cfile(self, new_path):
+
+        updater = self._update_verbaco_line if self.cfile_source == CFileSources.Verbaco else self._update_ascribe_line
         with open(self.cfile_path, mode='r', encoding='utf-8') as input_file, \
         open(new_path, mode='w', encoding='utf-8') as output_file:
             for input_line in input_file:
-                if cfile_source == CFileSources.Verbaco:
-                    output_line = self._update_verbaco_line(input_line, variable_map, category_map)
-                elif cfile_source == CFileSources.Ascribe:
-                    output_line = self._update_ascribe_line(input_line, variable_map, category_map)
+                output_line = updater(input_line)
                 output_file.write(output_line)
 
-    def _update_verbaco_line(self, input_line, variable_map, category_map):
+    def _update_verbaco_line(self, input_line):
         sql_parts = input_line.split(' ')
         assignment = sql_parts[3]
         variable = assignment.split('=')[0]
         codes = assignment.split('=')[1][1:-1].split(',')
-        new_variable = variable_map.get(variable, variable)
-        variable_category_map = category_map.get(variable)
+        new_variable = self.variable_map.get(variable, variable)
+        variable_category_map = self.category_map.get(variable)
         new_codes = [variable_category_map.get(c, c) for c in codes] if variable_category_map else codes
         new_codes_without_duplicates = dict.fromkeys(new_codes)
         new_assignment = f"{new_variable}={{{','.join(new_codes_without_duplicates)}}}"
         sql_parts[3] = new_assignment
         return ' '.join(sql_parts)
 
-
-    def _update_ascribe_line(self, input_line, variable_map, category_map):
+    def _update_ascribe_line(self, input_line):
         assignments_string, criteria = input_line[17:].split(' WHERE ')
         assignments = assignments_string.strip().split(', ')
         new_assignments = []
         for a in assignments:
             variable = a.split('=')[0].strip()
             codes = a.split('=')[1].strip()[1:-1].split(',')
-            new_variable = variable_map.get(variable, variable)
-            variable_category_map = category_map.get(variable)
+            new_variable = self.variable_map.get(variable, variable)
+            variable_category_map = self.category_map.get(variable)
             new_codes = [variable_category_map.get(c, c) for c in codes] if variable_category_map else codes
             new_codes_without_duplicates = dict.fromkeys(new_codes)
             new_assignment = f"{new_variable} = {{{','.join(new_codes_without_duplicates)}}}"
@@ -984,8 +1144,140 @@ class CFileManager:
         return f"UPDATE vdata SET {', '.join(new_assignments)} WHERE {criteria}"
 
 
-def update_master_mdd(master_path, verbaco_path, adapter):
-    pass
+############################################################################
+#
+#                               UTILITIES
+#
+############################################################################
 
-def update_master_ddf(master_path, cfile_path):
-    pass
+def sort_element(code):
+    return int(code[len(CODE_PREFIX):])
+
+def copy_mdd_ddf(input_path, output_path):
+    
+    # path should include complete directory path and file name without extention
+    # e.g. 'C:\Folder\file' for file.mdd in C:\Folder folder
+
+    from os.path import basename
+
+    copyfile(f'{input_path}.mdd', f'{output_path}.mdd')
+    copyfile(f'{input_path}.ddf', f'{output_path}.ddf')
+
+    mdd = client.Dispatch('MDM.Document')
+    mdd.Open(f'{output_path}.mdd')
+    mdd.DataSources.Default.DBLocation = basename(f'{output_path}.ddf')
+    mdd.Save()
+    mdd.Close()
+        
+def update_cfile(cfile_path, variable_map, category_map, new_path):
+    cfile_manager = CFileManager(cfile_path, variable_map, category_map)
+    cfile_manager.save_cfile(new_path)
+
+def update_master_with_mdd_codeplan_with_adapter(master_path, codeplan_path, adapter):
+
+    master_mdd = client.Dispatch('MDM.Document')
+    master_mdd.Open(master_path)
+    codeplan_file = MDDFile(codeplan_path)
+
+    # checks if all mdd types exist in adapter
+    for cp in codeplan_file:
+        if cp.name not in [m.mdd_name for m in adapter]:
+            print(f"WARNING: {cp.name} doesn't exist in adapter")
+
+    # update types
+    for m in adapter:
+        if m.mdd_name and m.master_name and m.mdd_name in codeplan_file:
+            print(f'Working on Codeplan {m.master_name}')
+            codeplan_mdd = codeplan_file[m.mdd_name]
+            # creates type if it doesn't exist in the master
+            if not master_mdd.Types.Exist(m.master_name):
+                create_type(master_mdd, m.master_name, codeplan_mdd)
+            master_elements = {e.Name.upper() for e in master_mdd.Types[m.master_name].Elements}
+            mdd_elements = {e.code for e in codeplan_mdd.elements}
+            
+            # adds new elements
+            missing_in_master = sorted(mdd_elements - master_elements, key=sort_element)
+            for e in missing_in_master:
+                print(f'Adding element {e}')
+                new_element = master_mdd.CreateElement(e, codeplan_mdd[e].label)
+                new_element.Type = ElementTypeConstants.mtCategory
+                master_mdd.Types[m.master_name].Add(new_element)
+
+            # updates labels
+            exist_in_both = sorted(mdd_elements & master_elements, key=sort_element)
+            for e in exist_in_both:
+                codeplan_element = codeplan_mdd[e]
+                master_element = master_mdd.Types[m.master_name].Elements[e]
+                if codeplan_element.label != master_element.Label:
+                    print(f'Overwriting label for {e}: "{master_element.Label}" -> "{codeplan_element.label}"')
+                    master_element.Label = codeplan_element.label
+
+    # update fields
+    original_variables = [v for v in codeplan_file.variables if v.label + HELPER_FIELD not in codeplan_file.variable_map]
+    new_variables =  [v for v in codeplan_file.variables if v.label + HELPER_FIELD in codeplan_file.variable_map]
+
+    # creates .Coding variable if doesn't exist
+    for v in original_variables:
+        if not master_mdd.Fields.Expanded.Exist(v.field_name + HELPER_FIELD):
+            master_type = [m.master_name for m in adapter if m.mdd_name == v.type_name][0]
+            create_variable(
+                mdd = master_mdd,
+                parent_collection = master_mdd.Fields[v.field_name].HelperFields,
+                var_name = HELPER_FIELD[1:],
+                type_name = master_type,
+                axis = v.axis
+            )
+
+    # checks and creates normal variables if they don't exist
+    for v in new_variables:
+        new_variable_name = codeplan_file.variable_map[v.label + HELPER_FIELD]
+        if not master_mdd.Fields.Expanded.Exist(new_variable_name):
+             master_type = [m.master_name for m in adapter if m.mdd_name == v.type_name][0]
+             create_variable(
+                mdd = master_mdd,
+                parent_collection = master_mdd.Fields,
+                var_name = new_variable_name,
+                type_name = master_type,
+                axis = v.axis
+            )
+
+    # # updates axis expressions
+    for m in adapter:
+        if m.mdd_name and m.master_name and m.mdd_name in codeplan_file:
+            for f in master_mdd.Fields.Expanded:
+                if f.ObjectTypeValue == ObjectTypesConstants.mtVariable and (f.Elements.ReferenceName == m.master_name or (f.Elements.IsReference and f.Elements.Reference.Name == m.master_name) or (f.Elements.Count > 0 and f.Elements[0].ReferenceName == m.master_name)):
+                    f.AxisExpression = codeplan_file[m.mdd_name].axis
+
+    master_mdd.CategoryMap.AutoAssignValues()
+    master_mdd.Save()
+    master_mdd.Close()
+
+def create_type(mdd, name, mdd_codeplan):
+    mdd_type = mdd.CreateElements(name)
+    for e in mdd_codeplan.elements:
+        element = mdd.CreateElement(e.code, e.label)
+        element.Type = ElementTypeConstants.mtCategory
+        mdd_type.Add(element)
+    mdd.Types.Add(mdd_type)
+
+
+def create_variable(mdd, parent_collection, var_name, type_name, axis):
+    new_variable = mdd.CreateVariable(var_name)
+    new_variable.DataType = DataTypeConstants.mtCategorical
+    new_variable.Elements.ReferenceName = type_name
+    new_variable.AxisExpression = axis
+    parent_collection.Add(new_variable)
+
+def execute_opens(connection, cfile_path):
+    
+    ddf = connect(connection).cursor()
+    ddf.execute('exec xp_syncdb')
+    with open(cfile_path, mode='r', encoding='utf-8') as sql_file:
+        line_number = 0
+        for sql_line in sql_file:
+            ddf.execute(sql_line)
+            line_number += 1
+            if line_number % 100 == 0:
+                print(f'{line_number} rows executed')
+    ddf.connection.commit()
+    ddf.close()
