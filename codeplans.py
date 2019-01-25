@@ -285,6 +285,7 @@ class CodeplanNode:
 
         return root
 
+
     @property
     def axis(self):
         if self._axis == None:
