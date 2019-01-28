@@ -29,7 +29,7 @@ def get_mdd_data(mdd_path):
     variables = {}
     for v in mdd.Variables:
         name = v.fullname
-        label = v.label
+        label = str(v.fulllabel)
         data_type=str(DataTypeConstants(v.datatype)).split('.')[1]
         categories = {}
         for c in v.Categories:
